@@ -1,61 +1,32 @@
-# PeerBridge
+<div align="center">
 
-> Bridge the gap between devices, directly.
+<br />
+<h1 font-family="monospace"> PEERBRIDGE</h1>
 
-## Problem Statement
-Traditional file sharing often relies on cloud storage, which means your sensitive data is stored on corporate servers, even if only temporarily. **PeerBridge** eliminates this by using **WebRTC** to create a direct, peer-to-peer link between two browsers. Files travel directly from the sender's device to the receiver's device — the server never sees, stores, or touches your data.
+### Decentralized Browser-to-Browser File & Text Sharing
 
-## Features
-- **Zero Server Storage:** Files never touch the server disk. Pure P2P transfer.
-- **Any File Type:** No restrictions on extensions.
-- **Unlimited File Size:** Only limited by browser memory and network.
-- **Password Protected:** Every transfer requires a password to initiate the connection.
-- **Reload-Safe:** Received files persist in **IndexedDB** until you choose to download them.
-- **Dashboard:** Track your transfer history (sent/received) with a Firebase-backed dashboard.
-- **Privacy First:** Passwords are hashed in-browser (SHA-256) and never sent in plaintext.
+<br />
 
-## Tech Stack
-| Layer | Technology |
-|---|---|
-| Frontend | React 18 + Vite |
-| Styling | Tailwind CSS + Framer Motion |
-| P2P | WebRTC (RTCDataChannel) |
-| Signaling | Node.js + Express + Socket.io |
-| Auth & DB | Firebase Auth (Google) + Firestore |
-| Storage | Browser IndexedDB |
 
-## Setup Instructions
+![Stack](https://img.shields.io/badge/React%2019%20%2B%20Tailwind%20v4%20%2B%20WebRTC-white?style=flat-square&labelColor=black)
+![P2P](https://img.shields.io/badge/P2P%20Direct%20Transfer-white?style=flat-square&labelColor=black)
+![Storage](https://img.shields.io/badge/Zero%20Server%20Storage-white?style=flat-square&labelColor=black)
 
-### Prerequisites
-- Node.js v18+
-- A Firebase project (for Auth and Firestore)
+<br />
 
-### 1. Configure Environment
-Create a `client/.env` file with your Firebase credentials:
-```env
-VITE_SIGNAL_URL=http://localhost:3001
-VITE_FIREBASE_API_KEY=your_key
-VITE_FIREBASE_AUTH_DOMAIN=your_domain
-VITE_FIREBASE_PROJECT_ID=your_project_id
-VITE_FIREBASE_APP_ID=your_app_id
-```
+</div>
 
-### 2. Install & Start Signaling Server
-```bash
-cd server
-npm install
-npm run dev
-```
+---
 
-### 3. Install & Start Client
-```bash
-cd client
-npm install
-npm run dev
-```
+## Overview
 
-## Architecture
-```
+**PeerBridge** is a decentralized, high-performance utility for direct file and text sharing. Built on the core principle of total privacy, it uses **WebRTC** to establish a direct link between two browsers. Your files travel directly from point A to point B — the signaling server only introduces the peers and never sees, stores, or touches your data.
+
+---
+
+## How It Works
+
+```text
 Sender's Browser                              Receiver's Browser
        │                                               │
        │         Signaling Server (Socket.io)          │
