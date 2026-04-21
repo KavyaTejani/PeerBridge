@@ -58,6 +58,30 @@ export default function ReceivePage() {
     const newSocket = io(SIGNAL_URL);
     setSocket(newSocket);
 
+    // Listeners must be attached BEFORE emitting join-room. The server emits
+    // "peer-joined" to the host the moment it processes our join, and the host
+    // replies with an "offer" — that offer can race the join-room ack and be
+    // dropped if we only subscribed inside the ack callback. Buffer anything
+    // that arrives before the ReceiverPeer exists and drain it once it does.
+    let receiverPeer = null;
+    let pendingOffer = null;
+    const pendingCandidates = [];
+
+    newSocket.on("offer", ({ offer }) => {
+      if (receiverPeer) receiverPeer.handleOffer(offer);
+      else pendingOffer = offer;
+    });
+
+    newSocket.on("ice-candidate", ({ candidate }) => {
+      if (receiverPeer) receiverPeer.addIceCandidate(candidate);
+      else pendingCandidates.push(candidate);
+    });
+
+    newSocket.on("host-left", () => {
+      setTransferStatus('error');
+      setError("Sender has disconnected.");
+    });
+
     newSocket.emit("join-room", { roomId, passwordHash: pHash }, (res) => {
       if (res.error) {
         setError(res.error);
@@ -68,10 +92,10 @@ export default function ReceivePage() {
       setVerified(true);
       setTransferStatus('idle');
 
-      const receiverPeer = new ReceiverPeer({
+      receiverPeer = new ReceiverPeer({
         socket: newSocket,
         roomId: roomId,
-        iceServers: res.iceServers, // Use ICE servers from server
+        iceServers: res.iceServers,
         sessionId: roomId,
         onStatusChange: (s) => setTransferStatus(s),
         onProgress: (idx, received, total) => {
@@ -91,18 +115,13 @@ export default function ReceivePage() {
 
       setPeer(receiverPeer);
 
-      newSocket.on("offer", ({ offer }) => {
-        receiverPeer.handleOffer(offer);
-      });
-
-      newSocket.on("ice-candidate", ({ candidate }) => {
-        receiverPeer.addIceCandidate(candidate);
-      });
-
-      newSocket.on("host-left", () => {
-        setTransferStatus('error');
-        setError("Sender has disconnected.");
-      });
+      if (pendingOffer) {
+        receiverPeer.handleOffer(pendingOffer);
+        pendingOffer = null;
+      }
+      while (pendingCandidates.length > 0) {
+        receiverPeer.addIceCandidate(pendingCandidates.shift());
+      }
     });
   };
 

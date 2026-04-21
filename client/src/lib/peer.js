@@ -3,16 +3,14 @@ const MAX_BUFFER = 2 * 1024 * 1024; // 2MB
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// Safety-net defaults only. The signaling server is the source of truth for
+// ICE config and passes the full list (including TURN) through the create-room
+// / join-room acks. These STUN entries exist just so a misconfigured server
+// doesn't leave the peer with zero candidates on trivial NATs.
 const DEFAULT_ICE_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
-  { urls: "stun:stun2.l.google.com:19302" },
-  { urls: "stun:stun3.l.google.com:19302" },
-  { urls: "stun:stun4.l.google.com:19302" },
-  { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
-  { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" },
-  { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
-  { urls: "turns:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" }
+  { urls: "stun:stun2.l.google.com:19302" }
 ];
 
 export class SenderPeer {

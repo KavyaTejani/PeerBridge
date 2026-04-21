@@ -18,33 +18,69 @@ app.use(express.json());
 
 const rooms = new Map();
 
-const ICE_SERVERS = [
+const STUN_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
   { urls: "stun:stun2.l.google.com:19302" },
   { urls: "stun:stun3.l.google.com:19302" },
-  { urls: "stun:stun4.l.google.com:19302" },
-  { 
-    urls: "turn:openrelay.metered.ca:80", 
-    username: "openrelayproject", 
-    credential: "openrelayproject" 
-  },
-  { 
-    urls: "turn:openrelay.metered.ca:443", 
-    username: "openrelayproject", 
-    credential: "openrelayproject" 
-  },
-  { 
-    urls: "turn:openrelay.metered.ca:443?transport=tcp", 
-    username: "openrelayproject", 
-    credential: "openrelayproject" 
-  },
-  { 
-    urls: "turns:openrelay.metered.ca:443?transport=tcp", 
-    username: "openrelayproject", 
-    credential: "openrelayproject" 
-  }
+  { urls: "stun:stun4.l.google.com:19302" }
 ];
+
+// ICE servers are resolved at startup (and refreshed periodically for short-lived
+// TURN credentials). Three configuration paths, in priority order:
+//
+//   1. METERED_APP_NAME + METERED_API_KEY   — fetch per-request credentials from
+//      https://dashboard.metered.ca/ (recommended; free tier is enough for dev/demo)
+//   2. TURN_URL + TURN_USERNAME + TURN_CREDENTIAL — a self-hosted coturn or any
+//      static TURN server. TURN_URL may be a comma-separated list.
+//   3. Neither — STUN-only, which works on home networks but fails on most
+//      corporate/symmetric-NAT setups.
+//
+// The old `openrelay.metered.ca` public credentials were removed — that service
+// is no longer reachable on the relay ports (443/3478), which is why transfers
+// fail on restrictive networks.
+let ICE_SERVERS = [...STUN_SERVERS];
+
+async function refreshIceServers() {
+  const meteredApp = process.env.METERED_APP_NAME;
+  const meteredKey = process.env.METERED_API_KEY;
+
+  if (meteredApp && meteredKey) {
+    try {
+      const res = await fetch(
+        `https://${meteredApp}.metered.live/api/v1/turn/credentials?apiKey=${meteredKey}`
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const turnServers = await res.json();
+      ICE_SERVERS = [...STUN_SERVERS, ...turnServers];
+      console.log(`[ICE] Loaded ${turnServers.length} TURN server(s) from Metered`);
+      return;
+    } catch (e) {
+      console.error("[ICE] Metered credential fetch failed:", e.message);
+    }
+  }
+
+  if (process.env.TURN_URL && process.env.TURN_USERNAME && process.env.TURN_CREDENTIAL) {
+    const urls = process.env.TURN_URL.split(",").map(s => s.trim()).filter(Boolean);
+    ICE_SERVERS = [
+      ...STUN_SERVERS,
+      {
+        urls,
+        username: process.env.TURN_USERNAME,
+        credential: process.env.TURN_CREDENTIAL
+      }
+    ];
+    console.log(`[ICE] Using manual TURN server(s): ${urls.join(", ")}`);
+    return;
+  }
+
+  ICE_SERVERS = [...STUN_SERVERS];
+  console.warn("[ICE] No TURN server configured — P2P will fail on restrictive NATs. Set METERED_APP_NAME+METERED_API_KEY or TURN_URL/TURN_USERNAME/TURN_CREDENTIAL.");
+}
+
+refreshIceServers();
+// Metered credentials are short-lived; refresh hourly.
+setInterval(refreshIceServers, 60 * 60 * 1000);
 
 app.get("/", (req, res) => {
   res.json({ status: "PeerBridge Signaling Server Running" });
