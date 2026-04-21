@@ -3,23 +3,25 @@ const MAX_BUFFER = 2 * 1024 * 1024; // 2MB
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+const DEFAULT_ICE_SERVERS = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:stun1.l.google.com:19302" },
+  { urls: "stun:stun2.l.google.com:19302" },
+  { urls: "stun:stun3.l.google.com:19302" },
+  { urls: "stun:stun4.l.google.com:19302" },
+  { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turns:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" }
+];
+
 export class SenderPeer {
   constructor({ socket, roomId, iceServers, onStatusChange, onProgress }) {
     this.socket = socket;
     this.roomId = roomId;
-    this.iceServers = iceServers || [
-      { urls: "stun:stun.l.google.com:19302" },
-      { urls: "stun:stun1.l.google.com:19302" },
-      { urls: "stun:stun2.l.google.com:19302" },
-      { urls: "stun:stun3.l.google.com:19302" },
-      { urls: "stun:stun4.l.google.com:19302" },
-      { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
-      { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" }
-    ];
+    this.iceServers = iceServers || DEFAULT_ICE_SERVERS;
     this.onStatusChange = onStatusChange;
     this.onProgress = onProgress;
-    this.pc = null;
-    this.dc = null;
     this.receivers = new Map(); // Map<peerId, { pc, dc, pendingCandidates: [] }>
   }
 
@@ -118,8 +120,8 @@ export class SenderPeer {
 
   destroy() {
     this.receivers.forEach(({ pc, dc }) => {
-      dc.close();
-      pc.close();
+      if (dc) dc.close();
+      if (pc) pc.close();
     });
     this.receivers.clear();
   }
@@ -129,15 +131,7 @@ export class ReceiverPeer {
   constructor({ socket, roomId, iceServers, sessionId, onStatusChange, onFileReceived, onProgress, onTextReceived, onAllDone }) {
     this.socket = socket;
     this.roomId = roomId;
-    this.iceServers = iceServers || [
-      { urls: "stun:stun.l.google.com:19302" },
-      { urls: "stun:stun1.l.google.com:19302" },
-      { urls: "stun:stun2.l.google.com:19302" },
-      { urls: "stun:stun3.l.google.com:19302" },
-      { urls: "stun:stun4.l.google.com:19302" },
-      { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
-      { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" }
-    ];
+    this.iceServers = iceServers || DEFAULT_ICE_SERVERS;
     this.sessionId = sessionId;
     this.onStatusChange = onStatusChange;
     this.onFileReceived = onFileReceived;
@@ -180,7 +174,7 @@ export class ReceiverPeer {
   }
 
   async addIceCandidate(candidate) {
-    if (this.pc.remoteDescription) {
+    if (this.pc && this.pc.remoteDescription) {
       await this.pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => console.warn(e));
     } else {
       this.pendingCandidates.push(candidate);
