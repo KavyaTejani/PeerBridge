@@ -18,6 +18,16 @@
 
 ---
 
+## Project Demo
+
+<div align="center">
+  <a href="https://www.youtube.com/watch?v=e5v1ACsLr70">
+    <img src="https://img.youtube.com/vi/e5v1ACsLr70/maxresdefault.jpg" alt="PeerBridge Demo" style="width:100%; max-width:600px; border-radius: 20px; box-shadow: 0 20px 50px rgba(0,0,0,0.1);">
+  </a>
+</div>
+
+---
+
 ## Overview
 
 **PeerBridge** is a decentralized, high-performance utility for direct file and text sharing. Built on the core principle of total privacy, it uses **WebRTC** to establish a direct link between two browsers. Your files travel directly from point A to point B — the signaling server only introduces the peers and never sees, stores, or touches your data.
