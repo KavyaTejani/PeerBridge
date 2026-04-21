@@ -16,8 +16,6 @@ const io = new Server(server, {
 app.use(cors());
 app.use(express.json());
 
-// In-memory room store
-// Each room: { roomId, passwordHash, hostId, meta: { files:[], totalSize }, peers: Set() }
 const rooms = new Map();
 
 const ICE_SERVERS = [
@@ -52,8 +50,6 @@ app.get("/room/:roomId", (req, res) => {
 });
 
 io.on("connection", (socket) => {
-  console.log("User connected:", socket.id);
-
   socket.on("create-room", ({ roomId, passwordHash, meta }, cb) => {
     rooms.set(roomId, {
       roomId,
@@ -65,7 +61,6 @@ io.on("connection", (socket) => {
     socket.join(roomId);
     socket.roomId = roomId;
     if (cb) cb({ status: "ok", iceServers: ICE_SERVERS });
-    console.log(`Room created: ${roomId}`);
   });
 
   socket.on("join-room", ({ roomId, passwordHash }, cb) => {
@@ -85,14 +80,10 @@ io.on("connection", (socket) => {
     socket.join(roomId);
     socket.roomId = roomId;
     
-    // Notify host
     io.to(room.hostId).emit("peer-joined", { peerId: socket.id });
-    
-    // Provide ICE servers to receiver
     socket.emit("ice-servers", ICE_SERVERS);
     
     if (cb) cb({ status: "ok", meta: room.meta, iceServers: ICE_SERVERS });
-    console.log(`User ${socket.id} joined room: ${roomId}`);
   });
 
   socket.on("offer", ({ offer, roomId, to }) => {
@@ -117,7 +108,6 @@ io.on("connection", (socket) => {
   });
 
   socket.on("disconnect", () => {
-    console.log("User disconnected:", socket.id);
     const roomId = socket.roomId;
     if (roomId) {
       const room = rooms.get(roomId);
@@ -125,7 +115,6 @@ io.on("connection", (socket) => {
         if (room.hostId === socket.id) {
           io.to(roomId).emit("host-left");
           rooms.delete(roomId);
-          console.log(`Room deleted (host left): ${roomId}`);
         } else {
           room.peers.delete(socket.id);
           io.to(room.hostId).emit("peer-left", { peerId: socket.id });

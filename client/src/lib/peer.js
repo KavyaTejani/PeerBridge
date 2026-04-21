@@ -20,7 +20,7 @@ export class SenderPeer {
     this.onProgress = onProgress;
     this.pc = null;
     this.dc = null;
-    this.receivers = new Map(); // Map<peerId, { pc, dc }>
+    this.receivers = new Map(); // Map<peerId, { pc, dc, pendingCandidates: [] }>
   }
 
   async createOffer(peerId) {
@@ -28,7 +28,7 @@ export class SenderPeer {
     const pc = new RTCPeerConnection({ iceServers: this.iceServers });
     const dc = pc.createDataChannel("fileTransfer", { ordered: true });
     
-    this.receivers.set(peerId, { pc, dc });
+    this.receivers.set(peerId, { pc, dc, pendingCandidates: [] });
 
     pc.onicecandidate = (e) => {
       if (e.candidate) {
@@ -37,7 +37,6 @@ export class SenderPeer {
     };
 
     dc.onopen = () => {
-      console.log(`DataChannel opened for ${peerId}`);
       this.onStatusChange('connected');
     };
 
@@ -50,13 +49,21 @@ export class SenderPeer {
     const peer = this.receivers.get(peerId);
     if (peer) {
       await peer.pc.setRemoteDescription(new RTCSessionDescription(answer));
+      while (peer.pendingCandidates.length > 0) {
+        const candidate = peer.pendingCandidates.shift();
+        await peer.pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => console.warn(e));
+      }
     }
   }
 
   async addIceCandidate(peerId, candidate) {
     const peer = this.receivers.get(peerId);
     if (peer) {
-      await peer.pc.addIceCandidate(new RTCIceCandidate(candidate));
+      if (peer.pc.remoteDescription) {
+        await peer.pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => console.warn(e));
+      } else {
+        peer.pendingCandidates.push(candidate);
+      }
     }
   }
 
@@ -69,11 +76,8 @@ export class SenderPeer {
 
     try {
       this.onStatusChange('transferring');
-      
-      // 1. Meta all
       sendJson({ cmd: "meta-all", fileCount: files.length, hasText: !!textContent });
 
-      // 2. Files
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
         sendJson({ cmd: "meta-file", name: file.name, size: file.size, type: file.type || "application/octet-stream", index: i });
@@ -85,30 +89,24 @@ export class SenderPeer {
           const { done, value } = await reader.read();
           if (done) break;
 
-          // Process value (Uint8Array) in chunks if necessary
           for (let pos = 0; pos < value.length; pos += CHUNK_SIZE) {
             const chunk = value.slice(pos, pos + CHUNK_SIZE);
-            
             while (dc.bufferedAmount > MAX_BUFFER) {
               await sleep(50);
             }
-            
             dc.send(chunk.buffer);
             offset += chunk.length;
             this.onProgress(i, offset, file.size);
           }
         }
-        
         sendJson({ cmd: "file-done", index: i });
         await sleep(100);
       }
 
-      // 3. Text
       if (textContent) {
         sendJson({ cmd: "text", content: textContent });
       }
 
-      // 4. All done
       sendJson({ cmd: "all-done" });
       this.onStatusChange('done');
 
@@ -151,19 +149,18 @@ export class ReceiverPeer {
     this.currentFileMeta = null;
     this.receivedChunks = [];
     this.receivedBytes = 0;
+    this.pendingCandidates = [];
     
     this._init();
   }
 
   _init() {
     this.pc = new RTCPeerConnection({ iceServers: this.iceServers });
-    
     this.pc.onicecandidate = (e) => {
       if (e.candidate) {
         this.socket.emit("ice-candidate", { candidate: e.candidate, roomId: this.roomId });
       }
     };
-
     this.pc.ondatachannel = (e) => {
       this.setupDataChannel(e.channel);
     };
@@ -175,17 +172,24 @@ export class ReceiverPeer {
     const answer = await this.pc.createAnswer();
     await this.pc.setLocalDescription(answer);
     this.socket.emit("answer", { answer, roomId: this.roomId });
+
+    while (this.pendingCandidates.length > 0) {
+      const candidate = this.pendingCandidates.shift();
+      await this.pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => console.warn(e));
+    }
   }
 
   async addIceCandidate(candidate) {
-    await this.pc.addIceCandidate(new RTCIceCandidate(candidate));
+    if (this.pc.remoteDescription) {
+      await this.pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => console.warn(e));
+    } else {
+      this.pendingCandidates.push(candidate);
+    }
   }
 
   setupDataChannel(channel) {
     channel.binaryType = "arraybuffer";
-    
     channel.onopen = () => {
-      console.log("Receiver DataChannel opened");
       this.onStatusChange('connected');
     };
 
@@ -194,11 +198,9 @@ export class ReceiverPeer {
         const msg = JSON.parse(e.data);
         this.handleCommand(msg);
       } else {
-        // Binary chunk
         this.receivedChunks.push(e.data);
         this.receivedBytes += e.data.byteLength;
         if (this.currentFileMeta) {
-          const pct = Math.round((this.receivedBytes / this.currentFileMeta.size) * 100);
           this.onProgress(this.currentFileMeta.index, this.receivedBytes, this.currentFileMeta.size);
         }
       }
