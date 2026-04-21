@@ -68,6 +68,7 @@ export default function SharePage() {
         const senderPeer = new SenderPeer({
           socket: newSocket,
           roomId: newRoomId,
+          iceServers: res.iceServers, // Use ICE servers from server
           onStatusChange: (s) => setTransferStatus(s),
           onProgress: (idx, sent, total) => {
             const pct = Math.round((sent / total) * 100);

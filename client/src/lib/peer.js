@@ -7,7 +7,13 @@ export class SenderPeer {
   constructor({ socket, roomId, iceServers, onStatusChange, onProgress }) {
     this.socket = socket;
     this.roomId = roomId;
-    this.iceServers = iceServers || [{ urls: "stun:stun.l.google.com:19302" }];
+    this.iceServers = iceServers || [
+      { urls: "stun:stun.l.google.com:19302" },
+      { urls: "stun:stun1.l.google.com:19302" },
+      { urls: "stun:stun2.l.google.com:19302" },
+      { urls: "stun:stun3.l.google.com:19302" },
+      { urls: "stun:stun4.l.google.com:19302" }
+    ];
     this.onStatusChange = onStatusChange;
     this.onProgress = onProgress;
     this.pc = null;
@@ -123,7 +129,13 @@ export class ReceiverPeer {
   constructor({ socket, roomId, iceServers, sessionId, onStatusChange, onFileReceived, onProgress, onTextReceived, onAllDone }) {
     this.socket = socket;
     this.roomId = roomId;
-    this.iceServers = iceServers || [{ urls: "stun:stun.l.google.com:19302" }];
+    this.iceServers = iceServers || [
+      { urls: "stun:stun.l.google.com:19302" },
+      { urls: "stun:stun1.l.google.com:19302" },
+      { urls: "stun:stun2.l.google.com:19302" },
+      { urls: "stun:stun3.l.google.com:19302" },
+      { urls: "stun:stun4.l.google.com:19302" }
+    ];
     this.sessionId = sessionId;
     this.onStatusChange = onStatusChange;
     this.onFileReceived = onFileReceived;
@@ -205,7 +217,7 @@ export class ReceiverPeer {
         this.onFileReceived(msg.index, { 
           name: this.currentFileMeta.name, 
           type: this.currentFileMeta.type, 
-          data: arrayBuffer 
+          arrayBuffer: arrayBuffer 
         });
         this.currentFileMeta = null;
         this.receivedChunks = [];

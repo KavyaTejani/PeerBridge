@@ -22,7 +22,10 @@ const rooms = new Map();
 
 const ICE_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
-  { urls: "stun:stun1.l.google.com:19302" }
+  { urls: "stun:stun1.l.google.com:19302" },
+  { urls: "stun:stun2.l.google.com:19302" },
+  { urls: "stun:stun3.l.google.com:19302" },
+  { urls: "stun:stun4.l.google.com:19302" }
 ];
 
 app.get("/", (req, res) => {
@@ -51,7 +54,7 @@ io.on("connection", (socket) => {
     });
     socket.join(roomId);
     socket.roomId = roomId;
-    if (cb) cb({ status: "ok" });
+    if (cb) cb({ status: "ok", iceServers: ICE_SERVERS });
     console.log(`Room created: ${roomId}`);
   });
 
@@ -78,7 +81,7 @@ io.on("connection", (socket) => {
     // Provide ICE servers to receiver
     socket.emit("ice-servers", ICE_SERVERS);
     
-    if (cb) cb({ status: "ok", meta: room.meta });
+    if (cb) cb({ status: "ok", meta: room.meta, iceServers: ICE_SERVERS });
     console.log(`User ${socket.id} joined room: ${roomId}`);
   });
 

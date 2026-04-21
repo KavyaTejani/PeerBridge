@@ -9,7 +9,7 @@ export default defineConfig({
     tailwindcss(),
   ],
   server: {
-    host: 'localhost',
+    host: true,
     port: 5173,
     headers: {
       "Cross-Origin-Opener-Policy": "same-origin-allow-popups",

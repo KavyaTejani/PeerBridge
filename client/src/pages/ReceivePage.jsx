@@ -71,6 +71,7 @@ export default function ReceivePage() {
       const receiverPeer = new ReceiverPeer({
         socket: newSocket,
         roomId: roomId,
+        iceServers: res.iceServers, // Use ICE servers from server
         sessionId: roomId,
         onStatusChange: (s) => setTransferStatus(s),
         onProgress: (idx, received, total) => {
@@ -124,7 +125,7 @@ export default function ReceivePage() {
   const downloadFile = (idx) => {
     const file = receivedFiles.find(f => f.index === idx);
     if (!file) return;
-    const blob = new Blob([file.data], { type: file.type });
+    const blob = new Blob([file.arrayBuffer], { type: file.type });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
