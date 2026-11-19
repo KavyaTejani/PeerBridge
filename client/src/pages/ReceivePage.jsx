@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { useTransfer } from '../hooks/useTransfer';
@@ -22,15 +22,19 @@ export default function ReceivePage() {
   const { roomId } = useParams();
   const navigate = useNavigate();
   const { user } = useAuth();
-  const { socket, setSocket, transferStatus, setTransferStatus, progress, setProgress, resetTransfer } = useTransfer();
+  const { setSocket, transferStatus, setTransferStatus, progress, setProgress, resetTransfer } = useTransfer();
 
   const [password, setPassword] = useState("");
   const [roomMeta, setRoomMeta] = useState(null);
   const [verified, setVerified] = useState(false);
+  const [joining, setJoining] = useState(false);
   const [receivedFiles, setReceivedFiles] = useState([]);
   const [receivedText, setReceivedText] = useState("");
-  const [peer, setPeer] = useState(null);
   const [error, setError] = useState(null);
+
+  // Refs so the unmount cleanup sees the live socket/peer, not the initial nulls.
+  const socketRef = useRef(null);
+  const peerRef = useRef(null);
 
   useEffect(() => {
     // Check if room exists and get meta
@@ -46,17 +50,30 @@ export default function ReceivePage() {
       .catch(() => setError("Failed to connect to signaling server"));
 
     return () => {
-      if (socket) socket.disconnect();
-      if (peer) peer.destroy();
+      if (socketRef.current) socketRef.current.disconnect();
+      if (peerRef.current) peerRef.current.destroy();
+      socketRef.current = null;
+      peerRef.current = null;
       resetTransfer();
     };
   }, [roomId]);
 
   const handleJoin = async () => {
+    if (joining) return;
     setError(null);
+    setJoining(true);
     const pHash = await hashPassword(password);
     const newSocket = io(SIGNAL_URL);
+    socketRef.current = newSocket;
     setSocket(newSocket);
+
+    newSocket.on("connect_error", () => {
+      // Only fatal before we've joined; afterwards socket.io keeps retrying.
+      if (peerRef.current) return;
+      setError("Can't reach the signaling server. Please try again.");
+      setJoining(false);
+      newSocket.disconnect();
+    });
 
     // Listeners must be attached BEFORE emitting join-room. The server emits
     // "peer-joined" to the host the moment it processes our join, and the host
@@ -78,13 +95,17 @@ export default function ReceivePage() {
     });
 
     newSocket.on("host-left", () => {
+      // The sender closing their tab after we've received everything is fine.
+      if (receiverPeer && (receiverPeer.allReceived || receiverPeer.status === 'done')) return;
+      if (receiverPeer) receiverPeer.destroy();
       setTransferStatus('error');
       setError("Sender has disconnected.");
     });
 
     newSocket.emit("join-room", { roomId, passwordHash: pHash }, (res) => {
-      if (res.error) {
-        setError(res.error);
+      setJoining(false);
+      if (!res || res.error) {
+        setError(res?.error || "Could not join the room.");
         newSocket.disconnect();
         return;
       }
@@ -97,9 +118,12 @@ export default function ReceivePage() {
         roomId: roomId,
         iceServers: res.iceServers,
         sessionId: roomId,
-        onStatusChange: (s) => setTransferStatus(s),
+        onStatusChange: (s, reason) => {
+          setTransferStatus(s);
+          if (s === 'error') setError(reason || "Transfer failed.");
+        },
         onProgress: (idx, received, total) => {
-          const pct = Math.round((received / total) * 100);
+          const pct = total > 0 ? Math.round((received / total) * 100) : 100;
           setProgress(prev => ({ ...prev, [idx]: pct }));
         },
         onFileReceived: async (idx, fileData) => {
@@ -113,7 +137,7 @@ export default function ReceivePage() {
         }
       });
 
-      setPeer(receiverPeer);
+      peerRef.current = receiverPeer;
 
       if (pendingOffer) {
         receiverPeer.handleOffer(pendingOffer);
@@ -188,9 +212,10 @@ export default function ReceivePage() {
 
               <button
                 onClick={handleJoin}
-                className="w-full bg-accent text-white py-4 rounded-2xl font-bold text-sm tracking-widest hover:opacity-90 transition-all shadow-xl shadow-accent/20"
+                disabled={joining}
+                className="w-full bg-accent text-white py-4 rounded-2xl font-bold text-sm tracking-widest hover:opacity-90 transition-all shadow-xl shadow-accent/20 disabled:opacity-50"
               >
-                JOIN BRIDGE
+                {joining ? 'JOINING...' : 'JOIN BRIDGE'}
               </button>
             </div>
           ) : (

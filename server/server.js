@@ -91,8 +91,41 @@ app.get("/room/:roomId", (req, res) => {
   }
 });
 
+const ROOM_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
+
+// Resolve who a signaling message from `socket` should go to. Messages are
+// only relayed between members of the same room: the host may address any of
+// its peers, a peer may only address the host.
+function resolveTarget(socket, roomId, to) {
+  if (!roomId || socket.roomId !== roomId) return null;
+  const room = rooms.get(roomId);
+  if (!room) return null;
+
+  if (socket.id === room.hostId) {
+    return to && room.peers.has(to) ? to : null;
+  }
+  if (room.peers.has(socket.id)) {
+    return !to || to === room.hostId ? room.hostId : null;
+  }
+  return null;
+}
+
 io.on("connection", (socket) => {
-  socket.on("create-room", ({ roomId, passwordHash, meta }, cb) => {
+  socket.on("create-room", ({ roomId, passwordHash, meta } = {}, cb) => {
+    if (typeof roomId !== "string" || !ROOM_ID_RE.test(roomId) || typeof passwordHash !== "string") {
+      if (cb) cb({ error: "Invalid room request" });
+      return;
+    }
+    if (socket.roomId) {
+      if (cb) cb({ error: "This connection is already in a room" });
+      return;
+    }
+    // Never let a new room silently replace an existing one (room hijacking).
+    if (rooms.has(roomId)) {
+      if (cb) cb({ error: "Room already exists" });
+      return;
+    }
+
     rooms.set(roomId, {
       roomId,
       passwordHash,
@@ -105,7 +138,11 @@ io.on("connection", (socket) => {
     if (cb) cb({ status: "ok", iceServers: ICE_SERVERS });
   });
 
-  socket.on("join-room", ({ roomId, passwordHash }, cb) => {
+  socket.on("join-room", ({ roomId, passwordHash } = {}, cb) => {
+    if (socket.roomId) {
+      if (cb) cb({ error: "This connection is already in a room" });
+      return;
+    }
     const room = rooms.get(roomId);
     if (!room) {
       if (cb) cb({ error: "Room not found" });
@@ -128,22 +165,22 @@ io.on("connection", (socket) => {
     if (cb) cb({ status: "ok", meta: room.meta, iceServers: ICE_SERVERS });
   });
 
-  socket.on("offer", ({ offer, roomId, to }) => {
-    const target = to || rooms.get(roomId)?.hostId;
+  socket.on("offer", ({ offer, roomId, to } = {}) => {
+    const target = resolveTarget(socket, roomId, to);
     if (target) {
       io.to(target).emit("offer", { offer, from: socket.id });
     }
   });
 
-  socket.on("answer", ({ answer, roomId, to }) => {
-    const target = to || rooms.get(roomId)?.hostId;
+  socket.on("answer", ({ answer, roomId, to } = {}) => {
+    const target = resolveTarget(socket, roomId, to);
     if (target) {
       io.to(target).emit("answer", { answer, from: socket.id });
     }
   });
 
-  socket.on("ice-candidate", ({ candidate, roomId, to }) => {
-    const target = to || rooms.get(roomId)?.hostId;
+  socket.on("ice-candidate", ({ candidate, roomId, to } = {}) => {
+    const target = resolveTarget(socket, roomId, to);
     if (target) {
       io.to(target).emit("ice-candidate", { candidate, from: socket.id });
     }

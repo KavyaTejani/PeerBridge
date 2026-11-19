@@ -1,5 +1,6 @@
 const CHUNK_SIZE = 256 * 1024; // 256KB
 const MAX_BUFFER = 2 * 1024 * 1024; // 2MB
+const CONNECT_TIMEOUT_MS = 30 * 1000;
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -13,22 +14,55 @@ const DEFAULT_ICE_SERVERS = [
   { urls: "stun:stun2.l.google.com:19302" }
 ];
 
+const FINAL_STATES = new Set(['done', 'error']);
+
+/**
+ * Sender side. Keeps one RTCPeerConnection per receiver and reports status and
+ * progress per receiver, so several receivers never overwrite each other.
+ *
+ * Callbacks:
+ *   onStatusChange(peerId, status, reason?)
+ *   onProgress(peerId, fileIndex, bytesSent, fileSize)
+ */
 export class SenderPeer {
-  constructor({ socket, roomId, iceServers, onStatusChange, onProgress }) {
+  constructor({ socket, roomId, iceServers, files, textContent, onStatusChange, onProgress }) {
     this.socket = socket;
     this.roomId = roomId;
     this.iceServers = iceServers || DEFAULT_ICE_SERVERS;
+    this.files = files || [];
+    this.textContent = textContent || "";
     this.onStatusChange = onStatusChange;
     this.onProgress = onProgress;
-    this.receivers = new Map(); // Map<peerId, { pc, dc, pendingCandidates: [] }>
+    this.receivers = new Map(); // Map<peerId, { pc, dc, pendingCandidates, status, timer, closed }>
+  }
+
+  _setStatus(peerId, status, reason) {
+    const peer = this.receivers.get(peerId);
+    if (!peer || peer.closed) return;
+    peer.status = status;
+    this.onStatusChange(peerId, status, reason);
+  }
+
+  _fail(peerId, reason) {
+    const peer = this.receivers.get(peerId);
+    if (!peer || peer.closed || FINAL_STATES.has(peer.status)) return;
+    console.warn(`[PeerBridge] Transfer to ${peerId} failed: ${reason}`);
+    clearTimeout(peer.timer);
+    this._setStatus(peerId, 'error', reason);
   }
 
   async createOffer(peerId) {
-    this.onStatusChange('connecting');
+    if (this.receivers.has(peerId)) this.removePeer(peerId);
+
     const pc = new RTCPeerConnection({ iceServers: this.iceServers });
     const dc = pc.createDataChannel("fileTransfer", { ordered: true });
-    
-    this.receivers.set(peerId, { pc, dc, pendingCandidates: [] });
+    const peer = { pc, dc, pendingCandidates: [], status: 'connecting', timer: null, closed: false };
+    this.receivers.set(peerId, peer);
+    this.onStatusChange(peerId, 'connecting');
+
+    peer.timer = setTimeout(() => {
+      if (peer.status === 'connecting') this._fail(peerId, 'Timed out connecting to receiver');
+    }, CONNECT_TIMEOUT_MS);
 
     pc.onicecandidate = (e) => {
       if (e.candidate) {
@@ -36,23 +70,40 @@ export class SenderPeer {
       }
     };
 
-    dc.onopen = () => {
-      this.onStatusChange('connected');
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'failed') this._fail(peerId, 'Peer connection failed');
     };
 
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    this.socket.emit("offer", { offer, roomId: this.roomId, to: peerId });
+    dc.onopen = () => {
+      clearTimeout(peer.timer);
+      this._setStatus(peerId, 'connected');
+      // Each receiver gets its own send as soon as its channel opens.
+      this.sendFiles(peerId);
+    };
+
+    dc.onclose = () => this._fail(peerId, 'Data channel closed before the transfer finished');
+    dc.onerror = () => this._fail(peerId, 'Data channel error');
+
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      this.socket.emit("offer", { offer, roomId: this.roomId, to: peerId });
+    } catch (e) {
+      this._fail(peerId, `Could not create offer: ${e.message}`);
+    }
   }
 
   async handleAnswer(peerId, answer) {
     const peer = this.receivers.get(peerId);
-    if (peer) {
+    if (!peer) return;
+    try {
       await peer.pc.setRemoteDescription(new RTCSessionDescription(answer));
       while (peer.pendingCandidates.length > 0) {
         const candidate = peer.pendingCandidates.shift();
         await peer.pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => console.warn(e));
       }
+    } catch (e) {
+      this._fail(peerId, `Invalid answer: ${e.message}`);
     }
   }
 
@@ -67,16 +118,20 @@ export class SenderPeer {
     }
   }
 
-  async sendFiles(peerId, files, textContent) {
+  async sendFiles(peerId) {
     const peer = this.receivers.get(peerId);
     if (!peer || !peer.dc || peer.dc.readyState !== 'open') return;
 
     const dc = peer.dc;
-    const sendJson = (obj) => dc.send(JSON.stringify(obj));
+    const files = this.files;
+    const ensureOpen = () => {
+      if (peer.closed || dc.readyState !== 'open') throw new Error('Data channel closed');
+    };
+    const sendJson = (obj) => { ensureOpen(); dc.send(JSON.stringify(obj)); };
 
     try {
-      this.onStatusChange('transferring');
-      sendJson({ cmd: "meta-all", fileCount: files.length, hasText: !!textContent });
+      this._setStatus(peerId, 'transferring');
+      sendJson({ cmd: "meta-all", fileCount: files.length, hasText: !!this.textContent });
 
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
@@ -91,40 +146,66 @@ export class SenderPeer {
 
           for (let pos = 0; pos < value.length; pos += CHUNK_SIZE) {
             const chunk = value.slice(pos, pos + CHUNK_SIZE);
+            // Backpressure; bail out instead of spinning forever if the channel dies.
             while (dc.bufferedAmount > MAX_BUFFER) {
+              ensureOpen();
               await sleep(50);
             }
+            ensureOpen();
             dc.send(chunk.buffer);
             offset += chunk.length;
-            this.onProgress(i, offset, file.size);
+            this.onProgress(peerId, i, offset, file.size);
           }
         }
         sendJson({ cmd: "file-done", index: i });
-        await sleep(100);
+        this.onProgress(peerId, i, file.size, file.size);
       }
 
-      if (textContent) {
-        sendJson({ cmd: "text", content: textContent });
+      if (this.textContent) {
+        sendJson({ cmd: "text", content: this.textContent });
       }
 
       sendJson({ cmd: "all-done" });
-      this.onStatusChange('done');
+      this._setStatus(peerId, 'done');
 
     } catch (error) {
-      console.error("Transfer error:", error);
-      this.onStatusChange('error');
+      this._fail(peerId, error.message || 'Transfer error');
     }
   }
 
+  /** Called when a receiver leaves the room; tears down its connection. */
+  removePeer(peerId) {
+    const peer = this.receivers.get(peerId);
+    if (!peer) return;
+    this._fail(peerId, 'Receiver disconnected');
+    peer.closed = true;
+    clearTimeout(peer.timer);
+    if (peer.dc) peer.dc.close();
+    if (peer.pc) peer.pc.close();
+    this.receivers.delete(peerId);
+  }
+
   destroy() {
-    this.receivers.forEach(({ pc, dc }) => {
-      if (dc) dc.close();
-      if (pc) pc.close();
+    this.receivers.forEach((peer) => {
+      peer.closed = true;
+      clearTimeout(peer.timer);
+      if (peer.dc) peer.dc.close();
+      if (peer.pc) peer.pc.close();
     });
     this.receivers.clear();
   }
 }
 
+/**
+ * Receiver side.
+ *
+ * Callbacks:
+ *   onStatusChange(status, reason?)
+ *   onProgress(fileIndex, bytesReceived, fileSize)
+ *   onFileReceived(fileIndex, { name, type, arrayBuffer })  (may be async)
+ *   onTextReceived(text)
+ *   onAllDone()
+ */
 export class ReceiverPeer {
   constructor({ socket, roomId, iceServers, sessionId, onStatusChange, onFileReceived, onProgress, onTextReceived, onAllDone }) {
     this.socket = socket;
@@ -138,12 +219,38 @@ export class ReceiverPeer {
     this.onAllDone = onAllDone;
 
     this.pc = null;
+    this.status = 'idle';
+    this.destroyed = false;
+    this.allReceived = false;
     this.currentFileMeta = null;
     this.receivedChunks = [];
     this.receivedBytes = 0;
     this.pendingCandidates = [];
-    
+    // Slow async work (blob -> ArrayBuffer, IndexedDB writes) runs on this
+    // queue so it stays in order without blocking incoming chunks.
+    this.queue = Promise.resolve();
+    this.timer = null;
+
     this._init();
+  }
+
+  _setStatus(status, reason) {
+    if (this.destroyed) return;
+    this.status = status;
+    this.onStatusChange(status, reason);
+  }
+
+  _fail(reason) {
+    if (this.destroyed || FINAL_STATES.has(this.status)) return;
+    console.warn(`[PeerBridge] Receive failed: ${reason}`);
+    clearTimeout(this.timer);
+    this._setStatus('error', reason);
+  }
+
+  _enqueue(task) {
+    this.queue = this.queue
+      .then(task)
+      .catch((e) => this._fail(`Failed to process received data: ${e.message}`));
   }
 
   _init() {
@@ -156,18 +263,30 @@ export class ReceiverPeer {
     this.pc.ondatachannel = (e) => {
       this.setupDataChannel(e.channel);
     };
+    this.pc.onconnectionstatechange = () => {
+      if (this.pc.connectionState === 'failed' && !this.allReceived) this._fail('Connection to sender failed');
+    };
+    this.timer = setTimeout(() => {
+      if (this.status === 'idle' || this.status === 'connecting') {
+        this._fail('Timed out connecting to sender');
+      }
+    }, CONNECT_TIMEOUT_MS);
   }
 
   async handleOffer(offer) {
-    this.onStatusChange('connecting');
-    await this.pc.setRemoteDescription(new RTCSessionDescription(offer));
-    const answer = await this.pc.createAnswer();
-    await this.pc.setLocalDescription(answer);
-    this.socket.emit("answer", { answer, roomId: this.roomId });
+    this._setStatus('connecting');
+    try {
+      await this.pc.setRemoteDescription(new RTCSessionDescription(offer));
+      const answer = await this.pc.createAnswer();
+      await this.pc.setLocalDescription(answer);
+      this.socket.emit("answer", { answer, roomId: this.roomId });
 
-    while (this.pendingCandidates.length > 0) {
-      const candidate = this.pendingCandidates.shift();
-      await this.pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => console.warn(e));
+      while (this.pendingCandidates.length > 0) {
+        const candidate = this.pendingCandidates.shift();
+        await this.pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => console.warn(e));
+      }
+    } catch (e) {
+      this._fail(`Could not answer sender: ${e.message}`);
     }
   }
 
@@ -182,55 +301,85 @@ export class ReceiverPeer {
   setupDataChannel(channel) {
     channel.binaryType = "arraybuffer";
     channel.onopen = () => {
-      this.onStatusChange('connected');
+      clearTimeout(this.timer);
+      this._setStatus('connected');
     };
+    channel.onclose = () => {
+      // Sender may close right after all-done while we are still saving files.
+      if (!this.allReceived) this._fail('Connection to sender was lost');
+    };
+    channel.onerror = () => this._fail('Data channel error');
 
-    channel.onmessage = async (e) => {
+    // Handled synchronously so chunk/command ordering is exactly the wire order.
+    channel.onmessage = (e) => {
       if (typeof e.data === 'string') {
-        const msg = JSON.parse(e.data);
+        let msg;
+        try {
+          msg = JSON.parse(e.data);
+        } catch {
+          console.warn('[PeerBridge] Ignoring malformed control message');
+          return;
+        }
         this.handleCommand(msg);
       } else {
+        if (!this.currentFileMeta) return; // stray chunk, not part of any file
         this.receivedChunks.push(e.data);
         this.receivedBytes += e.data.byteLength;
-        if (this.currentFileMeta) {
-          this.onProgress(this.currentFileMeta.index, this.receivedBytes, this.currentFileMeta.size);
-        }
+        this.onProgress(this.currentFileMeta.index, this.receivedBytes, this.currentFileMeta.size);
       }
     };
   }
 
-  async handleCommand(msg) {
+  handleCommand(msg) {
     switch (msg.cmd) {
       case 'meta-all':
-        this.onStatusChange('transferring');
+        this._setStatus('transferring');
         break;
+
       case 'meta-file':
         this.currentFileMeta = msg;
         this.receivedChunks = [];
         this.receivedBytes = 0;
         break;
-      case 'file-done':
-        const blob = new Blob(this.receivedChunks, { type: this.currentFileMeta.type });
-        const arrayBuffer = await blob.arrayBuffer();
-        this.onFileReceived(msg.index, { 
-          name: this.currentFileMeta.name, 
-          type: this.currentFileMeta.type, 
-          arrayBuffer: arrayBuffer 
-        });
+
+      case 'file-done': {
+        // Take ownership of this file's data and reset state *before* any
+        // await, so the next file's meta/chunks can't be wiped by this one.
+        const meta = this.currentFileMeta;
+        const chunks = this.receivedChunks;
         this.currentFileMeta = null;
         this.receivedChunks = [];
+        this.receivedBytes = 0;
+        if (!meta) break;
+
+        const blob = new Blob(chunks, { type: meta.type });
+        this.onProgress(meta.index, meta.size, meta.size);
+        this._enqueue(async () => {
+          const arrayBuffer = await blob.arrayBuffer();
+          await this.onFileReceived(meta.index, { name: meta.name, type: meta.type, arrayBuffer });
+        });
         break;
+      }
+
       case 'text':
-        this.onTextReceived(msg.content);
+        this._enqueue(() => this.onTextReceived(msg.content));
         break;
+
       case 'all-done':
-        this.onStatusChange('done');
-        this.onAllDone();
+        this.allReceived = true;
+        // Queued so "done" is only reported after every file has been saved.
+        this._enqueue(() => {
+          if (this.status === 'error') return;
+          this._setStatus('done');
+          this.onAllDone();
+        });
         break;
     }
   }
 
   destroy() {
+    this.destroyed = true;
+    clearTimeout(this.timer);
     if (this.pc) this.pc.close();
   }
 }
